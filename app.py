@@ -68,14 +68,21 @@ if not os.path.exists(MODEL_FILENAME):
     st.stop()
 
 # ---------------------------------------------------
-# YOLO CLI runner
+# YOLO CLI runner (FIXED – headless safe)
 # ---------------------------------------------------
 def run_yolo_cli(image_path):
     if os.path.exists(RUNS_DIR):
-        subprocess.run(["rm","-rf",RUNS_DIR])
+        subprocess.run(["rm", "-rf", RUNS_DIR])
+
+    # 🔑 Critical: force headless OpenCV
+    env = os.environ.copy()
+    env["OPENCV_VIDEOIO_PRIORITY_MSMF"] = "0"
+    env["QT_QPA_PLATFORM"] = "offscreen"
+    env["DISPLAY"] = ""
+    env["CUDA_VISIBLE_DEVICES"] = ""  # CPU-only, safest on Streamlit Cloud
 
     cmd = [
-        "yolo","predict",
+        "yolo", "predict",
         f"model={MODEL_FILENAME}",
         f"source={image_path}",
         "conf=0.4",
@@ -84,107 +91,126 @@ def run_yolo_cli(image_path):
         "save_txt=True",
         "save_conf=True"
     ]
-    subprocess.run(cmd)
 
-    pred_dir = os.path.join(RUNS_DIR,"predict")
-    img = next((os.path.join(pred_dir,f) for f in os.listdir(pred_dir) if f.endswith(".jpg")),None)
-    lbl = os.path.join(pred_dir,"labels",os.listdir(os.path.join(pred_dir,"labels"))[0])
+    subprocess.run(cmd, env=env, check=True)
+
+    pred_dir = os.path.join(RUNS_DIR, "predict")
+
+    img = next(
+        os.path.join(pred_dir, f)
+        for f in os.listdir(pred_dir)
+        if f.lower().endswith((".jpg", ".png"))
+    )
+
+    lbl_dir = os.path.join(pred_dir, "labels")
+    lbl = os.path.join(lbl_dir, os.listdir(lbl_dir)[0])
 
     return img, lbl
 
 def parse_labels(label_file, img_w, img_h):
-    detections=[]
+    detections = []
     with open(label_file) as f:
         for line in f:
-            c,x,y,w,h,conf = map(float,line.split())
-            x1=(x-w/2)*img_w; y1=(y-h/2)*img_h
-            x2=(x+w/2)*img_w; y2=(y+h/2)*img_h
+            c, x, y, w, h, conf = map(float, line.split())
+            x1 = (x - w/2) * img_w
+            y1 = (y - h/2) * img_h
+            x2 = (x + w/2) * img_w
+            y2 = (y + h/2) * img_h
             detections.append({
-                "class_id":int(c),
-                "class_name":CLASS_NAMES.get(int(c),str(c)),
-                "conf":conf,
-                "x1":x1,"y1":y1,"x2":x2,"y2":y2
+                "class_id": int(c),
+                "class_name": CLASS_NAMES.get(int(c), str(c)),
+                "conf": conf,
+                "x1": x1, "y1": y1, "x2": x2, "y2": y2
             })
     return detections
 
 # ---------------------------------------------------
 # Layout
 # ---------------------------------------------------
-left_col, right_col = st.columns([1.4,1.1])
+left_col, right_col = st.columns([1.4, 1.1])
 
 # ---------------- LEFT ----------------
 with left_col:
-    st.markdown("<div class='card'>",unsafe_allow_html=True)
-    uploaded = st.file_uploader("Upload site image",type=["jpg","jpeg","png"])
-    st.markdown("</div>",unsafe_allow_html=True)
+    st.markdown("<div class='card'>", unsafe_allow_html=True)
+    uploaded = st.file_uploader("Upload site image", type=["jpg", "jpeg", "png"])
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    detections_list=[]
-    annotated=None
-    infer_time=None
+    detections_list = []
+    annotated = None
+    infer_time = None
 
     if uploaded:
         input_img = Image.open(uploaded).convert("RGB")
-        st.image(input_img,use_container_width=True)
+        st.image(input_img, use_container_width=True)
 
-        temp_img="temp.jpg"
+        temp_img = "temp.jpg"
         input_img.save(temp_img)
 
         with st.spinner("Running PPE detection…"):
-            t0=time.time()
+            t0 = time.time()
             out_img, out_lbl = run_yolo_cli(temp_img)
-            infer_time=time.time()-t0
+            infer_time = time.time() - t0
 
         annotated = Image.open(out_img)
-        st.image(annotated,caption=f"Processed in {infer_time:.2f}s",use_container_width=True)
+        st.image(annotated, caption=f"Processed in {infer_time:.2f}s", use_container_width=True)
 
-        detections_list = parse_labels(out_lbl,input_img.width,input_img.height)
+        detections_list = parse_labels(out_lbl, input_img.width, input_img.height)
 
 # ---------------- RIGHT ----------------
 with right_col:
-    st.markdown("<div class='card'>",unsafe_allow_html=True)
-    st.markdown("<div class='section-title'>📊 Safety Snapshot</div>",unsafe_allow_html=True)
+    st.markdown("<div class='card'>", unsafe_allow_html=True)
+    st.markdown("<div class='section-title'>📊 Safety Snapshot</div>", unsafe_allow_html=True)
 
     if not detections_list:
-        st.markdown("<i>No detections yet</i>",unsafe_allow_html=True)
+        st.markdown("<i>No detections yet</i>", unsafe_allow_html=True)
     else:
         counts = Counter(d["class_id"] for d in detections_list)
-        persons = counts.get(5,0)
-        helmets = counts.get(1,0)
-        vests = counts.get(7,0)
-        shoes = counts.get(6,0)
-        gloves = counts.get(0,0)
-        no_flags = counts.get(3,0)+counts.get(4,0)+counts.get(2,0)
+        persons = counts.get(5, 0)
+        helmets = counts.get(1, 0)
+        vests = counts.get(7, 0)
+        shoes = counts.get(6, 0)
+        gloves = counts.get(0, 0)
+        no_flags = counts.get(3, 0) + counts.get(4, 0) + counts.get(2, 0)
 
-        compliant = helmets+vests+shoes+gloves
-        denom=max(1,compliant+no_flags)
-        score=int(100*compliant/denom)
+        compliant = helmets + vests + shoes + gloves
+        denom = max(1, compliant + no_flags)
+        score = int(100 * compliant / denom)
 
-        k1,k2,k3=st.columns(3)
-        k1.metric("Workers",persons)
-        k2.metric("PPE Issues",no_flags)
-        k3.metric("Compliance",f"{score}%")
+        k1, k2, k3 = st.columns(3)
+        k1.metric("Workers", persons)
+        k2.metric("PPE Issues", no_flags)
+        k3.metric("Compliance", f"{score}%")
 
-        st.markdown("<br>",unsafe_allow_html=True)
-        st.markdown("<span class='chip-ok'>Compliant</span>" if no_flags==0 else "<span class='chip-risk'>Issues Detected</span>",unsafe_allow_html=True)
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown(
+            "<span class='chip-ok'>Compliant</span>" if no_flags == 0
+            else "<span class='chip-risk'>Issues Detected</span>",
+            unsafe_allow_html=True
+        )
 
-        st.markdown("<br><div class='section-title'>Detected Items</div>",unsafe_allow_html=True)
-        for cid,cnt in counts.items():
-            st.markdown(f"<span class='badge'>{CLASS_NAMES[cid]}: {cnt}</span>",unsafe_allow_html=True)
+        st.markdown("<br><div class='section-title'>Detected Items</div>", unsafe_allow_html=True)
+        for cid, cnt in counts.items():
+            st.markdown(
+                f"<span class='badge'>{CLASS_NAMES[cid]}: {cnt}</span>",
+                unsafe_allow_html=True
+            )
 
-    st.markdown("</div>",unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
 # ---------------------------------------------------
-# Webcam (kept for UI completeness – uses same pipeline)
+# Webcam (same pipeline)
 # ---------------------------------------------------
-st.markdown("<div class='card'>",unsafe_allow_html=True)
-st.markdown("<div class='section-title'>🎥 Quick Webcam Test</div>",unsafe_allow_html=True)
+st.markdown("<div class='card'>", unsafe_allow_html=True)
+st.markdown("<div class='section-title'>🎥 Quick Webcam Test</div>", unsafe_allow_html=True)
 cam = st.camera_input("Capture frame")
+
 if cam:
-    cam_img=Image.open(cam).convert("RGB")
+    cam_img = Image.open(cam).convert("RGB")
     cam_img.save("cam.jpg")
-    out_img,_=run_yolo_cli("cam.jpg")
-    st.image(Image.open(out_img),use_container_width=True)
-st.markdown("</div>",unsafe_allow_html=True)
+    out_img, _ = run_yolo_cli("cam.jpg")
+    st.image(Image.open(out_img), use_container_width=True)
+
+st.markdown("</div>", unsafe_allow_html=True)
 
 # ---------------------------------------------------
 # Footer
